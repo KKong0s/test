@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Social Media & Mental Health Dashboard</title>
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700;800&family=Sarabun:wght@400;600;700;800&display=swap" rel="stylesheet">
+  
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #000;
+    }
+  </style>
+
+  <!-- 1. ตั้งค่า Import Maps เพื่อดึง React และ Recharts ผ่าน ES Modules -->
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.2.0",
+      "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+      "recharts": "https://esm.sh/recharts@2.12.2"
+    }
+  }
+  </script>
+
+  <!-- 2. ดึง Babel มาแปลง JSX ให้ Browser เข้าใจ -->
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- 3. ใช้ data-type="module" เพื่อให้ใช้คำสั่ง import ได้ -->
+  <script type="text/babel" data-type="module">
+    // Import เครื่องมือต่างๆ แบบเดียวกับที่เขียนในโปรเจกต์ปกติ
+    import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
+    import { createRoot } from "react-dom/client";
+    import {
+      BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
+      PieChart, Pie, Cell, Legend
+    } from "recharts";
+
+    // ── CSV PARSER ────────────────────────────────────────────────────────────
+    const parseCSV = (text) => {
+      const lines = text.trim().split('\n');
+      if (lines.length < 2) return [];
+      const raw    = lines[0];
+      const headers = raw.split(',').map(h => h.trim().replace(/^"|"$/g, '').replace(/^\uFEFF/, ''));
+
+      const findCol = (...candidates) => {
+        for (const c of candidates) {
+          const idx = headers.findIndex(h => h.toLowerCase().replace(/\s/g,'').includes(c.toLowerCase().replace(/\s/g,'')));
+          if (idx !== -1) return idx;
+        }
+        return -1;
+      };
+
+      const ageIdx      = findCol('age','อายุ','1. What is your age');
+      const genderIdx   = findCol('gender','เพศ','sex','2. Gender','3. Gender');
+      const platformIdx = findCol('platform','แพลตฟอร์ม','7. What social media platforms','social_media_platforms','app');
+      const timeIdx     = findCol('time_spent','8. What is the average time','เวลา','time','hour','spent');
+
+      const ageGroup = (age) => age <= 24 ? 0 : age <= 34 ? 1 : age <= 49 ? 2 : 3;
+
+      const normGender = (v = '') => {
+        const s = v.toLowerCase().trim().replace(/^"|"$/g, '');
+        if (s.includes('female') || s.includes('หญิง') || s === 'f') return 'หญิง';
+        if (s.includes('male')   || s.includes('ชาย')  || s === 'm') return 'ชาย';
+        return 'ไม่ระบุ';
+      };
+
+      const normPlat = (v = '') => {
+        const s = v.trim().replace(/^"|"$/g, '');
+        const known = ['YouTube','Instagram','Facebook','TikTok','Twitter','Snapchat','LinkedIn','Reddit'];
+        const match = known.find(p => s.toLowerCase().includes(p.toLowerCase()));
+        if (match === 'Twitter') return 'Twitter/X';
+        return match || (s.length > 0 ? s : 'อื่นๆ');
+      };
+
+      const rows = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].match(/(".*?"|[^,]+)(?=,|$)/g)?.map(c => c.trim().replace(/^"|"$/g, '')) ?? lines[i].split(',').map(c => c.trim());
+        if (cols.length < 2) continue;
+        const age = ageIdx !== -1 ? parseFloat(cols[ageIdx]) : NaN;
+        if (isNaN(age) || age <= 0 || age > 120) continue;
+        rows.push({
+          id:        i,
+          age,
+          gender:    genderIdx   !== -1 ? normGender(cols[genderIdx])   : 'ไม่ระบุ',
+          platform:  platformIdx !== -1 ? normPlat(cols[platformIdx])   : 'อื่นๆ',
+          timeSpent: timeIdx     !== -1 ? cols[timeIdx]                 : 'ไม่ระบุ',
+          ageGroup:  ageGroup(age),
+        });
+      }
+      return rows;
+    };
+
+    // ── CONSTANTS ─────────────────────────────────────────────────────────────
+    const PLAT_COLORS = {
+      YouTube:'#FF4444', Instagram:'#E1306C', Facebook:'#1877F2',
+      TikTok:'#69C9D0', 'Twitter/X':'#1DA1F2', Snapchat:'#FDE047',
+      LinkedIn:'#0A66C2', Reddit:'#FF4500', 'อื่นๆ':'#94a3b8',
+    };
+    const GENDER_COLORS = { หญิง:'#F472B6', ชาย:'#60A5FA', ไม่ระบุ:'#A78BFA' };
+    const AGE_GROUPS    = ['ทุกช่วงอายุ','18–24 ปี','25–34 ปี','35–49 ปี','50–64 ปี'];
+
+    const filterByAge = (data, ag) =>
+      ag === 'ทุกช่วงอายุ' ? data : data.filter(d => {
+        const g = ['18–24 ปี','25–34 ปี','35–49 ปี','50–64 ปี'].indexOf(ag);
+        return d.ageGroup === g;
+      });
+
+    const platCount = (data, gender) => {
+      const sub = gender ? data.filter(d => d.gender === gender) : data;
+      const map  = {};
+      sub.forEach(d => { map[d.platform] = (map[d.platform] || 0) + 1; });
+      return Object.entries(map).map(([name,value]) => ({name,value})).sort((a,b) => b.value - a.value);
+    };
+
+    const avg = arr => arr.length ? (arr.reduce((s,v) => s+v, 0) / arr.length).toFixed(1) : '–';
+
+    // ── ANIMATED BAR SHAPE ────────────────────────────────────────────────────
+    const AnimatedBar = (props) => {
+      const { x, y, width, height, fill } = props;
+      const [hov, setHov] = useState(false);
+      const sc  = hov ? 1.07 : 1;
+      const cx  = x + width / 2;
+      const cy  = y + height / 2;
+      return (
+        <g onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)} style={{cursor:'pointer'}}>
+          <rect
+            x={cx - (width * sc) / 2}   y={cy - (height * sc) / 2}
+            width={width * sc}           height={height * sc}
+            fill={fill} rx={4} ry={4}
+            style={{
+              transition: 'all 0.22s cubic-bezier(0.34,1.56,0.64,1)',
+              filter: hov ? `drop-shadow(0 0 7px ${fill}99)` : 'none',
+            }}
+          />
+        </g>
+      );
+    };
+
+    // ── TOOLTIPS ──────────────────────────────────────────────────────────────
+    const DarkTip = ({ active, payload, label }) => {
+      if (!active || !payload?.length) return null;
+      return (
+        <div style={{background:'#0f172a',border:'1px solid #334155',borderRadius:8,padding:'9px 13px'}}>
+          <p style={{color:'#94a3b8',fontSize:11,margin:'0 0 3px'}}>{label}</p>
+          {payload.map((p,i) => (
+            <p key={i} style={{color:p.color||'#e2e8f0',fontWeight:700,fontSize:13,margin:'2px 0'}}>
+              {p.name}: {p.value} คน
+            </p>
+          ))}
+        </div>
+      );
+    };
+
+    const CompareTip = ({ active, payload, label }) => {
+      if (!active || !payload?.length) return null;
+      const col = PLAT_COLORS[label] || '#60A5FA';
+      return (
+        <div style={{background:'#0f172a',border:`1px solid ${col}55`,borderRadius:10,padding:'11px 15px',boxShadow:'0 8px 24px #00000088',minWidth:155}}>
+          <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:8}}>
+            <div style={{width:10,height:10,borderRadius:3,background:col}}/>
+            <span style={{color:'#e2e8f0',fontWeight:700,fontSize:13}}>{label}</span>
+          </div>
+          {payload.map((p,i) => (
+            <div key={i} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:14,marginBottom:3}}>
+              <div style={{display:'flex',alignItems:'center',gap:6}}>
+                <div style={{width:7,height:7,borderRadius:2,background:p.fill}}/>
+                <span style={{color:'#94a3b8',fontSize:12}}>{p.name}</span>
+              </div>
+              <span style={{color:p.fill,fontWeight:700,fontSize:13}}>{p.value} คน</span>
+            </div>
+          ))}
+          {payload.length >= 2 && (
+            <div style={{borderTop:'1px solid #1e293b',marginTop:7,paddingTop:7,display:'flex',justifyContent:'space-between'}}>
+              <span style={{color:'#64748b',fontSize:11}}>รวม</span>
+              <span style={{color:'#e2e8f0',fontWeight:700,fontSize:12}}>{payload.reduce((s,p)=>s+p.value,0)} คน</span>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ── UI ATOMS ──────────────────────────────────────────────────────────────
+    const StatCard = ({label,value,unit='',color='#60A5FA',icon,sub}) => (
+      <div style={{background:'linear-gradient(135deg,#1e293b 0%,#0f172a 100%)',border:`1px solid ${color}40`,borderRadius:16,padding:'18px 20px',flex:1,minWidth:148,position:'relative',overflow:'hidden',boxShadow:`0 0 24px ${color}12`}}>
+        <div style={{position:'absolute',top:-16,right:-16,width:68,height:68,borderRadius:'50%',background:`${color}10`}}/>
+        <div style={{color:'#64748b',fontSize:11,letterSpacing:.7,textTransform:'uppercase',marginBottom:6,display:'flex',alignItems:'center',gap:5}}>
+          <span>{icon}</span>{label}
+        </div>
+        <div style={{display:'flex',alignItems:'baseline',gap:5,flexWrap:'wrap'}}>
+          <span style={{color,fontSize:28,fontWeight:800,lineHeight:1}}>{value}</span>
+          {unit && <span style={{color:'#64748b',fontSize:13}}>{unit}</span>}
+        </div>
+        {sub && <div style={{color:'#475569',fontSize:10,marginTop:5,lineHeight:1.5}}>{sub}</div>}
+      </div>
+    );
+
+    const Title = ({children,accent='#60A5FA'}) => (
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:13}}>
+        <div style={{width:4,height:19,borderRadius:4,background:accent,flexShrink:0}}/>
+        <span style={{color:'#e2e8f0',fontSize:14,fontWeight:700}}>{children}</span>
+      </div>
+    );
+
+    const HBar = ({data}) => (
+      <div style={{display:'flex',flexDirection:'column',gap:7}}>
+        {data.slice(0,6).map((d,i) => {
+          const pct = data[0]?.value > 0 ? (d.value/data[0].value)*100 : 0;
+          const col = PLAT_COLORS[d.name] || '#60A5FA';
+          return (
+            <div key={d.name} style={{display:'flex',alignItems:'center',gap:7}}>
+              <span style={{width:86,color:'#94a3b8',fontSize:10,textAlign:'right',flexShrink:0,whiteSpace:'nowrap'}}>
+                {i===0?'🥇':i===1?'🥈':i===2?'🥉':'  '} {d.name}
+              </span>
+              <div style={{flex:1,height:19,background:'#1e293b',borderRadius:5,overflow:'hidden'}}>
+                <div style={{width:`${pct}%`,height:'100%',background:`linear-gradient(90deg,${col}88,${col})`,borderRadius:5,transition:'width .5s ease',display:'flex',alignItems:'center',paddingLeft:5}}>
+                  {pct > 14 && <span style={{color:'#fff',fontSize:10,fontWeight:700}}>{d.value}</span>}
+                </div>
+              </div>
+              {pct <= 14 && <span style={{color:col,fontSize:10,fontWeight:700,width:22,textAlign:'right'}}>{d.value}</span>}
+            </div>
+          );
+        })}
+      </div>
+    );
+
+    const Donut = ({data}) => {
+      const top = data[0];
+      return (
+        <div style={{position:'relative'}}>
+          <ResponsiveContainer width="100%" height={180}>
+            <PieChart>
+              <Pie data={data} cx="50%" cy="50%" innerRadius={55} outerRadius={80} paddingAngle={3} dataKey="value" startAngle={90} endAngle={-270}>
+                {data.map(d => <Cell key={d.name} fill={PLAT_COLORS[d.name]||'#60A5FA'} stroke="transparent"/>)}
+              </Pie>
+              <Tooltip content={<DarkTip/>}/>
+            </PieChart>
+          </ResponsiveContainer>
+          <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-62%)',textAlign:'center',pointerEvents:'none'}}>
+            <div style={{color:'#e2e8f0',fontSize:11,fontWeight:700}}>{top?.name}</div>
+            <div style={{color:'#60A5FA',fontSize:19,fontWeight:800}}>{top?.value}</div>
+            <div style={{color:'#64748b',fontSize:9}}>คน</div>
+          </div>
+        </div>
+      );
+    };
+
+    // ── DATA TABLE ─────────────────────────────────────────────────────────────
+    const ROWS_PER_PAGE = 15;
+    const DataTable = ({ data }) => {
+      const [search, setSearch]             = useState('');
+      const [filterAge, setFilterAge]       = useState('ทุกช่วงอายุ');
+      const [filterGender, setFilterGender] = useState('ทั้งหมด');
+      const [filterPlat, setFilterPlat]     = useState('ทั้งหมด');
+      const [page, setPage]                 = useState(1);
+      const [sortCol, setSortCol]           = useState('id');
+      const [sortDir, setSortDir]           = useState('asc');
+
+      const allPlatforms = useMemo(() => ['ทั้งหมด', ...new Set(data.map(d => d.platform))], [data]);
+
+      const filtered = useMemo(() => {
+        let d = data;
+        const q = search.toLowerCase();
+        if (q) d = d.filter(r =>
+          String(r.age).includes(q) ||
+          r.gender.toLowerCase().includes(q) ||
+          r.platform.toLowerCase().includes(q) ||
+          r.timeSpent.toLowerCase().includes(q)
+        );
+        if (filterAge !== 'ทุกช่วงอายุ') {
+          const g = ['18–24 ปี','25–34 ปี','35–49 ปี','50–64 ปี'].indexOf(filterAge);
+          d = d.filter(r => r.ageGroup === g);
+        }
+        if (filterGender !== 'ทั้งหมด') d = d.filter(r => r.gender   === filterGender);
+        if (filterPlat   !== 'ทั้งหมด') d = d.filter(r => r.platform === filterPlat);
+        return [...d].sort((a,b) => {
+          let va = a[sortCol], vb = b[sortCol];
+          if (typeof va === 'string') { va = va.toLowerCase(); vb = vb.toLowerCase(); }
+          return sortDir === 'asc' ? (va > vb ? 1 : va < vb ? -1 : 0) : (va < vb ? 1 : va > vb ? -1 : 0);
+        });
+      }, [data, search, filterAge, filterGender, filterPlat, sortCol, sortDir]);
+
+      const totalPages = Math.ceil(filtered.length / ROWS_PER_PAGE);
+      const pageData   = filtered.slice((page-1)*ROWS_PER_PAGE, page*ROWS_PER_PAGE);
+
+      const doSort = col => {
+        if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+        else { setSortCol(col); setSortDir('asc'); }
+        setPage(1);
+      };
+      const reset = () => { setSearch(''); setFilterAge('ทุกช่วงอายุ'); setFilterGender('ทั้งหมด'); setFilterPlat('ทั้งหมด'); setPage(1); };
+      const dirty = search || filterAge !== 'ทุกช่วงอายุ' || filterGender !== 'ทั้งหมด' || filterPlat !== 'ทั้งหมด';
+
+      const selStyle = {background:'#1e293b',color:'#e2e8f0',border:'1px solid #334155',borderRadius:7,padding:'6px 10px',fontSize:11,cursor:'pointer',outline:'none'};
+      const thStyle  = {padding:'10px 12px',color:'#64748b',fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:.6,borderBottom:'1px solid #1e293b',whiteSpace:'nowrap',cursor:'pointer',userSelect:'none'};
+      const SortIcon = ({col}) => sortCol !== col
+        ? <span style={{color:'#334155',marginLeft:4}}>⇅</span>
+        : <span style={{color:'#60A5FA',marginLeft:4}}>{sortDir==='asc'?'↑':'↓'}</span>;
+
+      return (
+        <div style={{background:'#0a1628',border:'1px solid #1e293b',borderRadius:16,padding:'20px',marginBottom:18}}>
+          <Title accent="#818CF8">📋 ข้อมูลทั้งหมด</Title>
+
+          {/* FILTER BAR */}
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14,alignItems:'center'}}>
+            <div style={{position:'relative',flex:1,minWidth:180}}>
+              <span style={{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',color:'#475569',fontSize:13}}>🔍</span>
+              <input value={search} onChange={e => { setSearch(e.target.value); setPage(1); }}
+                placeholder="ค้นหา อายุ เพศ แอป เวลา..."
+                style={{width:'100%',boxSizing:'border-box',background:'#1e293b',color:'#e2e8f0',border:'1px solid #334155',borderRadius:8,padding:'7px 10px 7px 32px',fontSize:12,outline:'none'}}/>
+            </div>
+            <select value={filterAge}    onChange={e => { setFilterAge(e.target.value);    setPage(1); }} style={selStyle}>
+              {AGE_GROUPS.map(g => <option key={g}>{g}</option>)}
+            </select>
+            <select value={filterGender} onChange={e => { setFilterGender(e.target.value); setPage(1); }} style={selStyle}>
+              {['ทั้งหมด','หญิง','ชาย','ไม่ระบุ'].map(g => <option key={g}>{g}</option>)}
+            </select>
+            <select value={filterPlat}   onChange={e => { setFilterPlat(e.target.value);   setPage(1); }} style={selStyle}>
+              {allPlatforms.map(p => <option key={p}>{p}</option>)}
+            </select>
+            {dirty && (
+              <button onClick={reset} style={{background:'#1e293b',border:'1px solid #EF444440',borderRadius:7,padding:'6px 12px',color:'#EF4444',fontSize:11,cursor:'pointer'}}>
+                ✕ ล้าง
+              </button>
+            )}
+            <span style={{color:'#475569',fontSize:11,marginLeft:'auto'}}>{filtered.length.toLocaleString()} แถว</span>
+          </div>
+
+          {/* TABLE */}
+          <div style={{overflowX:'auto',borderRadius:10,border:'1px solid #1e293b'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+              <thead>
+                <tr style={{background:'#0f172a'}}>
+                  {[['id','#'],['age','อายุ'],['gender','เพศ'],['platform','แพลตฟอร์ม'],['timeSpent','เวลา/วัน']].map(([col,lbl]) => (
+                    <th key={col} onClick={() => doSort(col)} style={thStyle}>{lbl}<SortIcon col={col}/></th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pageData.length === 0
+                  ? <tr><td colSpan={5} style={{textAlign:'center',padding:'32px',color:'#475569',fontSize:13}}>ไม่พบข้อมูลที่ตรงกัน</td></tr>
+                  : pageData.map((row, i) => (
+                    <tr key={row.id}
+                      style={{background: i%2===0 ? '#0a1628' : '#0d1c35', transition:'background .12s'}}
+                      onMouseEnter={e => e.currentTarget.style.background='#1e293b'}
+                      onMouseLeave={e => e.currentTarget.style.background = i%2===0 ? '#0a1628' : '#0d1c35'}
+                    >
+                      <td style={{padding:'9px 12px',color:'#475569',borderBottom:'1px solid #ffffff05'}}>{row.id}</td>
+                      <td style={{padding:'9px 12px',color:'#94a3b8',borderBottom:'1px solid #ffffff05',fontWeight:600}}>{row.age}</td>
+                      <td style={{padding:'9px 12px',borderBottom:'1px solid #ffffff05'}}>
+                        <span style={{background:`${GENDER_COLORS[row.gender]||'#64748b'}18`,color:GENDER_COLORS[row.gender]||'#94a3b8',border:`1px solid ${GENDER_COLORS[row.gender]||'#64748b'}35`,borderRadius:5,padding:'2px 8px',fontSize:11,fontWeight:600}}>
+                          {row.gender}
+                        </span>
+                      </td>
+                      <td style={{padding:'9px 12px',borderBottom:'1px solid #ffffff05'}}>
+                        <div style={{display:'flex',alignItems:'center',gap:6}}>
+                          <div style={{width:7,height:7,borderRadius:2,background:PLAT_COLORS[row.platform]||'#64748b',flexShrink:0}}/>
+                          <span style={{color:PLAT_COLORS[row.platform]||'#94a3b8',fontWeight:600}}>{row.platform}</span>
+                        </div>
+                      </td>
+                      <td style={{padding:'9px 12px',color:'#64748b',borderBottom:'1px solid #ffffff05'}}>{row.timeSpent}</td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
+
+          {/* PAGINATION */}
+          {totalPages > 1 && (
+            <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:5,marginTop:14,flexWrap:'wrap'}}>
+              {[['«',1],['‹',Math.max(1,page-1)]].map(([lbl,p]) => (
+                <button key={lbl} onClick={() => setPage(p)} disabled={page===1}
+                  style={{background:'#1e293b',border:'1px solid #334155',borderRadius:6,padding:'5px 9px',color:page===1?'#334155':'#94a3b8',cursor:page===1?'default':'pointer',fontSize:11}}>{lbl}</button>
+              ))}
+              {Array.from({length: Math.min(5, totalPages)}, (_,i) => {
+                let p;
+                if (totalPages <= 5)       p = i + 1;
+                else if (page <= 3)        p = i + 1;
+                else if (page >= totalPages-2) p = totalPages - 4 + i;
+                else                       p = page - 2 + i;
+                return (
+                  <button key={p} onClick={() => setPage(p)}
+                    style={{background:p===page?'#2563EB':'#1e293b',border:`1px solid ${p===page?'#2563EB':'#334155'}`,borderRadius:6,padding:'5px 9px',color:p===page?'#fff':'#94a3b8',cursor:'pointer',fontSize:11,fontWeight:p===page?700:400,minWidth:30}}>
+                    {p}
+                  </button>
+                );
+              })}
+              {[['›',Math.min(totalPages,page+1)],['»',totalPages]].map(([lbl,p]) => (
+                <button key={lbl} onClick={() => setPage(p)} disabled={page===totalPages}
+                  style={{background:'#1e293b',border:'1px solid #334155',borderRadius:6,padding:'5px 9px',color:page===totalPages?'#334155':'#94a3b8',cursor:page===totalPages?'default':'pointer',fontSize:11}}>{lbl}</button>
+              ))}
+              <span style={{color:'#475569',fontSize:11,marginLeft:4}}>หน้า {page}/{totalPages}</span>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ── LOADING SCREEN ─────────────────────────────────────────────────────────
+    const LoadingScreen = ({ error, fileName }) => (
+      <div style={{minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'radial-gradient(ellipse at 20% 20%,#0f1e3d 0%,#060d1a 65%,#000 100%)',gap:20}}>
+        <div style={{width:52,height:52,borderRadius:14,background:'linear-gradient(135deg,#3b82f6,#818cf8)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:26}}>📊</div>
+        {error ? (
+          <>
+            <div style={{color:'#EF4444',fontSize:16,fontWeight:700}}>โหลดข้อมูลไม่สำเร็จ</div>
+            <div style={{color:'#64748b',fontSize:12,maxWidth:340,textAlign:'center',lineHeight:1.8}}>
+              ไม่พบไฟล์ <code style={{color:'#F59E0B',background:'#1e293b',padding:'2px 6px',borderRadius:4}}>{fileName}</code><br/>
+              ตรวจสอบว่าไฟล์อยู่ใน root ของ repo เดียวกันกับ <code style={{color:'#60A5FA',background:'#1e293b',padding:'2px 6px',borderRadius:4}}>index.html</code>
+            </div>
+            <div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:10,padding:'14px 20px',fontSize:11,color:'#64748b',maxWidth:360}}>
+              <div style={{color:'#94a3b8',fontWeight:700,marginBottom:6}}>โครงสร้าง repo ที่ถูกต้อง:</div>
+              <pre style={{margin:0,color:'#60A5FA',lineHeight:1.8}}>
+    {`📁 your-repo/
+    ├── index.html
+    ├── ${fileName}   ← ต้องอยู่ตรงนี้
+    └── ...`}
+              </pre>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{color:'#e2e8f0',fontSize:15,fontWeight:600}}>กำลังโหลด {fileName}…</div>
+            <div style={{width:200,height:4,background:'#1e293b',borderRadius:4,overflow:'hidden'}}>
+              <div style={{height:'100%',background:'linear-gradient(90deg,#3b82f6,#818cf8)',borderRadius:4,animation:'slide 1.2s ease-in-out infinite'}}/>
+            </div>
+            <style>{`@keyframes slide{0%{width:0%;margin-left:0}50%{width:60%;margin-left:20%}100%{width:0%;margin-left:100%}}`}</style>
+          </>
+        )}
+      </div>
+    );
+
+    // ── MAIN DASHBOARD ────────────────────────────────────────────────────────
+    const CSV_FILE = 'social_media_mental_health.csv';
+
+    function Dashboard() {
+      const [rawData,  setRawData]   = useState([]);
+      const [loading,  setLoading]   = useState(true);
+      const [fetchErr, setFetchErr]  = useState(false);
+      const [ageFilter,setAgeFilter] = useState('ทุกช่วงอายุ');
+
+      // ── Auto-fetch CSV on mount ───────────────────────────────────────────
+      useEffect(() => {
+        fetch(CSV_FILE)
+          .then(res => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.text();
+          })
+          .then(text => {
+            const rows = parseCSV(text);
+            if (rows.length === 0) throw new Error('empty');
+            setRawData(rows);
+            setLoading(false);
+          })
+          .catch(() => {
+            setFetchErr(true);
+            setLoading(false);
+          });
+      }, []);
+
+      // ── Derived data ──────────────────────────────────────────────────────
+      const data        = useMemo(() => filterByAge(rawData, ageFilter), [rawData, ageFilter]);
+      const totalCount  = data.length;
+      const overallData = useMemo(() => platCount(data, null),    [data]);
+      const femaleData  = useMemo(() => platCount(data, 'หญิง'),  [data]);
+      const maleData    = useMemo(() => platCount(data, 'ชาย'),   [data]);
+      const topPlatform = overallData[0]?.name || '–';
+
+      const platSD = useMemo(() => {
+        const counts = overallData.map(d => d.value);
+        if (!counts.length) return '0';
+        const m = counts.reduce((s,v) => s+v, 0) / counts.length;
+        return Math.sqrt(counts.reduce((s,v) => s+(v-m)**2, 0) / counts.length).toFixed(1);
+      }, [overallData]);
+
+      const genderDist = ['หญิง','ชาย','ไม่ระบุ'].map(g => ({
+        name:g, value: data.filter(d => d.gender === g).length
+      }));
+      const allPlats    = [...new Set(rawData.map(d => d.platform))];
+      const compareData = allPlats.map(p => ({
+        name: p,
+        หญิง: data.filter(d => d.gender === 'หญิง' && d.platform === p).length,
+        ชาย:  data.filter(d => d.gender === 'ชาย'  && d.platform === p).length,
+      })).sort((a,b) => (b.หญิง + b.ชาย) - (a.หญิง + a.ชาย));
+
+      // ── Render guards ─────────────────────────────────────────────────────
+      if (loading)  return <LoadingScreen error={false} fileName={CSV_FILE}/>;
+      if (fetchErr) return <LoadingScreen error={true}  fileName={CSV_FILE}/>;
+
+      return (
+        <div style={{minHeight:'100vh',background:'radial-gradient(ellipse at 20% 20%,#0f1e3d 0%,#060d1a 65%,#000 100%)',color:'#e2e8f0',fontFamily:"'Sarabun','Noto Sans Thai',sans-serif",padding:'22px 18px',boxSizing:'border-box'}}>
+
+          {/* HEADER */}
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:18,borderBottom:'1px solid #1e293b',paddingBottom:16,flexWrap:'wrap',gap:10}}>
+            <div>
+              <div style={{display:'flex',alignItems:'center',gap:10}}>
+                <div style={{width:36,height:36,borderRadius:10,background:'linear-gradient(135deg,#3b82f6,#818cf8)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:17}}>📊</div>
+                <h1 style={{margin:0,fontSize:20,fontWeight:800,background:'linear-gradient(90deg,#60a5fa,#a78bfa)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent'}}>
+                  Social Media & Mental Health
+                </h1>
+              </div>
+              <p style={{margin:'3px 0 0 46px',color:'#475569',fontSize:11}}>
+                📁 {CSV_FILE} • {rawData.length.toLocaleString()} records
+              </p>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <span style={{color:'#64748b',fontSize:12}}>ช่วงอายุ:</span>
+              <select value={ageFilter} onChange={e => setAgeFilter(e.target.value)}
+                style={{background:'#1e293b',color:'#e2e8f0',border:'1px solid #334155',borderRadius:8,padding:'7px 12px',fontSize:12,cursor:'pointer',outline:'none'}}>
+                {AGE_GROUPS.map(g => <option key={g}>{g}</option>)}
+              </select>
+              <div style={{background:'#1e293b',border:'1px solid #1e293b',borderRadius:7,padding:'7px 11px',color:'#64748b',fontSize:11}}>{totalCount} คน</div>
+            </div>
+          </div>
+
+          {/* STAT CARDS */}
+          <div style={{display:'flex',gap:11,marginBottom:18,flexWrap:'wrap'}}>
+            <StatCard icon="📐" label="ค่าเฉลี่ย (Mean)" color="#60A5FA"
+              value={avg(data.map(d=>d.age))} unit="ปี"
+              sub={`ชาย ${avg(data.filter(d=>d.gender==='ชาย').map(d=>d.age))} ปี  •  หญิง ${avg(data.filter(d=>d.gender==='หญิง').map(d=>d.age))} ปี`}/>
+            <StatCard icon="🗂️" label="จำนวนข้อมูลทั้งหมด" color="#34D399"
+              value={totalCount.toLocaleString()} unit="แถว"
+              sub={`Raw: ${rawData.length.toLocaleString()} • Filter: ${ageFilter}`}/>
+            <StatCard icon="🔑" label="ตัวแปรสำคัญที่สุด" color="#F59E0B"
+              value="Platform" unit=""
+              sub={`SD = ${platSD} • ${overallData.length} แพลตฟอร์ม`}/>
+            <StatCard icon="🏆" label="คนส่วนใหญ่ใช้" color="#F472B6"
+              value={topPlatform} unit=""
+              sub={`${overallData[0]?.value||0} คน (${totalCount>0?((overallData[0]?.value||0)/totalCount*100).toFixed(1):0}%)`}/>
+          </div>
+
+          {/* ROW 2 — DONUT + OVERALL */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:14}}>
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:16,padding:'17px 20px'}}>
+              <Title accent="#A78BFA">สัดส่วนเพศ</Title>
+              <div style={{display:'flex',alignItems:'center',gap:10}}>
+                <div style={{flex:1}}>
+                  <ResponsiveContainer width="100%" height={165}>
+                    <PieChart>
+                      <Pie data={genderDist} cx="50%" cy="50%" innerRadius={48} outerRadius={72} paddingAngle={4} dataKey="value" startAngle={90} endAngle={-270}>
+                        {genderDist.map(d => <Cell key={d.name} fill={GENDER_COLORS[d.name]} stroke="transparent"/>)}
+                      </Pie>
+                      <Tooltip content={<DarkTip/>}/>
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div style={{display:'flex',flexDirection:'column',gap:9}}>
+                  {genderDist.map(d => (
+                    <div key={d.name} style={{display:'flex',alignItems:'center',gap:6}}>
+                      <div style={{width:8,height:8,borderRadius:2,background:GENDER_COLORS[d.name],flexShrink:0}}/>
+                      <span style={{color:'#94a3b8',fontSize:11}}>{d.name}</span>
+                      <span style={{color:GENDER_COLORS[d.name],fontWeight:700,fontSize:13,marginLeft:6}}>{d.value}</span>
+                      <span style={{color:'#475569',fontSize:10}}>({totalCount>0?(d.value/totalCount*100).toFixed(1):0}%)</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:16,padding:'17px 20px'}}>
+              <Title accent="#34D399">อันดับแอปยอดนิยม (รวมทุกเพศ)</Title>
+              <HBar data={overallData}/>
+            </div>
+          </div>
+
+          {/* ROW 3 — GENDER BARS */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:14}}>
+            {[['หญิง',femaleData,'#F472B6','👩'],['ชาย',maleData,'#60A5FA','👨']].map(([sex,sd,col,emoji]) => (
+              <div key={sex} style={{background:'#0f172a',border:`1px solid ${col}25`,borderRadius:16,padding:'17px 20px'}}>
+                <Title accent={col}>{emoji} เพศ{sex} — ใช้แอปไหนมากสุด</Title>
+                <HBar data={sd}/>
+                <div style={{marginTop:11,padding:'8px 12px',background:`${col}12`,borderRadius:8,border:`1px solid ${col}28`}}>
+                  <span style={{color:col,fontWeight:700,fontSize:12}}>🏆 อันดับ 1: {sd[0]?.name}</span>
+                  <span style={{color:'#64748b',fontSize:11,marginLeft:7}}>
+                    {sd[0]?.value} คน ({data.filter(d=>d.gender===sex).length>0?((sd[0]?.value||0)/data.filter(d=>d.gender===sex).length*100).toFixed(1):0}%)
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* ROW 4 — COMPARE BAR */}
+          <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:16,padding:'17px 20px',marginBottom:14}}>
+            <Title accent="#F59E0B">เปรียบเทียบการใช้แอป — เพศชาย vs เพศหญิง</Title>
+            <ResponsiveContainer width="100%" height={210}>
+              <BarChart data={compareData} barCategoryGap="28%" barGap={4} margin={{top:8,right:14,bottom:4,left:0}}>
+                <XAxis dataKey="name" tick={{fill:'#94a3b8',fontSize:10}} axisLine={false} tickLine={false}/>
+                <YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickLine={false}/>
+                <Tooltip content={<CompareTip/>} cursor={false}/>
+                <Legend formatter={v=><span style={{color:'#94a3b8',fontSize:11}}>{v}</span>} wrapperStyle={{paddingTop:5}}/>
+                <Bar dataKey="หญิง" fill="#F472B6" maxBarSize={32} shape={<AnimatedBar/>}/>
+                <Bar dataKey="ชาย"  fill="#60A5FA" maxBarSize={32} shape={<AnimatedBar/>}/>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* ROW 5 — DONUT x2 */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:18}}>
+            {[['หญิง',femaleData,'#F472B6','👩'],['ชาย',maleData,'#60A5FA','👨']].map(([sex,sd,col,emoji]) => (
+              <div key={sex} style={{background:'#0f172a',border:`1px solid ${col}25`,borderRadius:16,padding:'17px 20px'}}>
+                <Title accent={col}>{emoji} Top แอป เพศ{sex} (Donut)</Title>
+                <Donut data={sd.length ? sd : [{name:'ไม่มีข้อมูล',value:1}]}/>
+                <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:5,justifyContent:'center'}}>
+                  {sd.map(d => (
+                    <div key={d.name} style={{display:'flex',alignItems:'center',gap:4}}>
+                      <div style={{width:7,height:7,borderRadius:2,background:PLAT_COLORS[d.name]||'#94a3b8'}}/>
+                      <span style={{color:'#94a3b8',fontSize:10}}>{d.name} {d.value}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* DATA TABLE */}
+          <DataTable data={rawData}/>
+
+          {/* FOOTER */}
+          <div style={{textAlign:'center',color:'#1e293b',fontSize:10,borderTop:'1px solid #0f172a',paddingTop:12}}>
+            {CSV_FILE} • Social Media & Mental Health Dashboard
+          </div>
+        </div>
+      );
+    }
+
+    // Render ลง DOM ด้วย createRoot ของ React 18
+    const root = createRoot(document.getElementById('root'));
+    root.render(<Dashboard />);
+  </script>
+</body>
+</html>
